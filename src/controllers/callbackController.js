@@ -3,18 +3,16 @@ const { getPlayerBalance, updatePlayerBalance } = require('../services/playerBal
 const { findTransactionByRefId, saveTransaction } = require('../services/transactionService');
 
 const Transaction = require('../models/transactionModel');
+const PlaceBet = require('../models/placeBetModel');
+
+const callBack = async (req, res) => {
+    res.status(200).send("Hello callback");
+};
 
 const checkBalance = async (req, res) => {
-    const { username, currency, id } = req.body;
+    const { username, currency, id, productId } = req.body;
     try {
         const balance = await getPlayerBalance(username, currency);
-
-        await Transaction.create({
-            username,
-            type: 'Check Balance',
-            amount: balance,
-            currency
-        });
         res.json({
             id,
             statusCode: 0,
@@ -22,52 +20,67 @@ const checkBalance = async (req, res) => {
             currency,
             balance,
             username,
+            productId
         });
     } catch (error) {
         res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
     }
 };
 
-// Example for the placeBets function with database interaction
 const placeBets = async (req, res) => {
-    const { username, currency, txns, id } = req.body;
+    const { id, productId, username, currency, timestampMillis, txns } = req.body;
     try {
         const totalBetAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
         const balanceBefore = await getPlayerBalance(username, currency);
-
         if (balanceBefore < totalBetAmount) {
-            return res.status(400).json({ id, statusCode: 1, error: 'Insufficient Balance' });
-        }
-
-        await updatePlayerBalance(username, -totalBetAmount, currency);
-        const balanceAfter = balanceBefore - totalBetAmount;
-
-        // Assuming each txn needs to be logged separately
-        for (const txn of txns) {
-            await Transaction.create({
-                username,
-                type: 'Place Bets',
-                amount: -txn.betAmount,
+            return res.status(400).json({
+                id,
+                statusCode: 1,
+                error: 'Insufficient Balance',
+                timestampMillis,
                 currency,
-                status: txn.status, // This should match your model's requirement
-                refId: txn.txnId, // Assuming txnId is used as refId
-                detail: txn,
-                timestampMillis: req.body.timestampMillis
+                username,
+                productId,
+                balanceBefore,
+                balanceAfter: balanceBefore
             });
         }
-
+        await updatePlayerBalance(username, -totalBetAmount, currency);
+        const balanceAfter = balanceBefore - totalBetAmount;
+        await PlaceBet.create({
+            requestId: id,
+            timestampMillis,
+            productId,
+            currency,
+            username,
+            txns,
+            balanceBefore,
+            balanceAfter
+        });
         res.json({
             id,
             statusCode: 0,
-            timestampMillis: Date.now(),
+            timestampMillis: timestampMillis + 100,
+            productId,
             currency,
             balanceBefore,
             balanceAfter,
-            username,
+            username
         });
     } catch (error) {
         console.error('Failed to place bets:', { error, username, txns });
-        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+        res.status(500).json({
+            id,
+            statusCode: 1,
+            error: 'Internal Server Error',
+            detail: error.message,
+            timestampMillis,
+            currency,
+            username,
+            productId,
+            balanceBefore: undefined,
+            balanceAfter: undefined
+        });
     }
 };
 
@@ -89,6 +102,7 @@ const updateBalance = async (req, res) => {
     }
 };
 
+// Function to get balance
 const getBalance = async (req, res) => {
     const { username, currency } = req.body;
     try {
@@ -103,27 +117,60 @@ const getBalance = async (req, res) => {
 };
 
 const settleBets = async (req, res) => {
-    const { username, currency, txns, id } = req.body;
+    const { id, productId, username, currency, timestampMillis, txns } = req.body;
     try {
-        const totalBetAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
-        const totalPayoutAmount = txns.reduce((sum, txn) => sum + txn.payoutAmount, 0);
+        // Calculate the total payouts and bets
+        let totalPayout = txns.reduce((acc, txn) => acc + txn.payoutAmount, 0);
+        let totalBets = txns.reduce((acc, txn) => acc + Math.abs(txn.betAmount), 0);
+        
+        // Get the user's balance before the transactions
         const balanceBefore = await getPlayerBalance(username, currency);
-        if (balanceBefore < totalBetAmount) {
-            return res.status(400).json({ id, statusCode: 1, error: 'Insufficient Balance' });
-        }
-        await updatePlayerBalance(username, totalPayoutAmount - totalBetAmount, currency);
-        const balanceAfter = balanceBefore + (totalPayoutAmount - totalBetAmount);
+        
+        // Calculate the net change in balance
+        const netChange = totalPayout - totalBets;
+        
+        // Update the user's balance
+        await updatePlayerBalance(username, netChange, currency);
+        const balanceAfter = balanceBefore + netChange;
+
+        // Log each transaction
+        txns.forEach(async (txn) => {
+            await Transaction.create({
+                username,
+                productId,
+                currency,
+                amount: txn.payoutAmount - Math.abs(txn.betAmount),
+                refId: txn.txnId,
+                type: 'SETTLE_BETS',
+                status: txn.status,
+                roundId: txn.roundId,
+                gameCode: txn.gameCode,
+                playInfo: txn.playInfo,
+                transactionType: 'BY_TRANSACTION', // or 'BY_ROUND' based on your system design
+                timestampMillis,
+                balanceBefore,
+                balanceAfter
+            });
+        });
+
+        // Send the response with the updated balance information
         res.json({
-            id,
-            statusCode: 0,
-            timestampMillis: Date.now(),
+            username,
             currency,
+            timestampMillis: Date.now(),
             balanceBefore,
             balanceAfter,
-            username,
+            id,
+            statusCode: 0,
+            productId
         });
     } catch (error) {
-        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+        console.error('Failed to settle bets:', { error, username });
+        res.status(500).json({
+            statusCode: 1,
+            error: 'Internal Server Error',
+            detail: error.message
+        });
     }
 };
 
@@ -320,6 +367,7 @@ const adjustBalance = async (req, res) => {
 };
 
 module.exports = {
+    callBack,
     checkBalance,
     placeBets,
     updateBalance,

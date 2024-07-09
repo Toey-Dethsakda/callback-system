@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { checkBalance, placeBets, updateBalance, getBalance, settleBets, cancelBets, adjustBets, rollbackBets, winRewards, payTips, cancelTips, voidSettled, adjustBalance } = require('../controllers/callbackController');
+const { callBack, checkBalance, placeBets, updateBalance, getBalance, settleBets, cancelBets, adjustBets, rollbackBets, winRewards, payTips, cancelTips, voidSettled, adjustBalance } = require('../controllers/callbackController');
 
+router.post('/', callBack);
 router.post('/checkBalance', checkBalance);
 router.post('/placeBets', placeBets);
 router.post('/updateBalance', updateBalance);
