@@ -11,32 +11,41 @@ const callBack = async (req, res) => {
 const logTransactions = async (txns, username, productId, currency, balanceBefore, balanceAfter, timestampMillis) => {
     try {
         for (const txn of txns) {
-            // Check for duplicate refId before creating the transaction
+            // ตรวจสอบ refId ที่ซ้ำก่อนที่จะสร้างการทำธุรกรรม
             const existingTransaction = await findTransactionByRefId(txn.txnId);
             if (!existingTransaction) {
+                // คำนวณจำนวนเงิน, ตรวจสอบให้แน่ใจว่าเป็นตัวเลขที่ถูกต้อง
+                const amount = txn.payoutAmount !== undefined && txn.betAmount !== undefined
+                    ? txn.payoutAmount - Math.abs(txn.betAmount)
+                    : 0;
+
+                if (isNaN(amount)) {
+                    throw new Error(`จำนวนเงินที่คำนวณได้เป็น NaN สำหรับ ID การทำธุรกรรม: ${txn.txnId}`);
+                }
+
                 await Transaction.create({
                     username,
                     productId,
                     currency,
-                    amount: -txn.betAmount,  // Negative because it's a bet
+                    amount,
                     refId: txn.txnId,
                     status: txn.status,
                     roundId: txn.roundId,
                     gameCode: txn.gameCode,
                     playInfo: txn.playInfo,
-                    transactionType: 'BY_TRANSACTION', // This could also be 'BY_ROUND' depending on the system design
+                    transactionType: 'BY_TRANSACTION', // อาจเป็น 'BY_ROUND' ขึ้นอยู่กับการออกแบบระบบ
                     timestampMillis,
                     balanceBefore,
                     balanceAfter
                 });
             } else {
-                console.log(`Transaction with refId ${txn.txnId} already exists.`);
+                console.log(`การทำธุรกรรมที่มี refId ${txn.txnId} มีอยู่แล้ว.`);
             }
         }
-        console.log('All transactions logged successfully');
+        console.log('บันทึกการทำธุรกรรมทั้งหมดสำเร็จ');
     } catch (error) {
-        console.error('Error logging transactions:', error);
-        throw error; // Rethrowing error to be handled by the caller
+        console.error('เกิดข้อผิดพลาดในการบันทึกการทำธุรกรรม:', error);
+        throw error; // ส่งต่อข้อผิดพลาดเพื่อให้ผู้เรียกจัดการ
     }
 };
 
@@ -61,51 +70,51 @@ const checkBalance = async (req, res) => {
 const placeBets = async (req, res) => {
     const { id, productId, username, currency, timestampMillis, txns } = req.body;
     try {
-        // Calculate total bet amount
+        // คำนวณจำนวนเงินเดิมพันทั้งหมด
         const totalBetAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
 
-        // Fetch current balance before placing bets
+        // ดึงยอดเงินปัจจุบันก่อนที่จะวางเดิมพัน
         const balanceBefore = await getPlayerBalance(username, currency);
 
-        // Check for insufficient funds
+        // ตรวจสอบยอดเงินไม่เพียงพอ
         if (balanceBefore < totalBetAmount) {
             return res.status(200).json({
                 id,
-                statusCode: 10002,  // Custom error code for insufficient balance
+                statusCode: 10002,  // รหัสข้อผิดพลาดที่กำหนดเองสำหรับยอดเงินไม่เพียงพอ
                 error: 'Insufficient Balance',
                 timestampMillis,
                 currency,
                 username,
                 productId,
-                balance: balanceBefore  // Returning the current balance without change
+                balance: balanceBefore  // คืนยอดเงินปัจจุบันโดยไม่มีการเปลี่ยนแปลง
             });
         }
 
-        // Check for duplicate transactions
+        // ตรวจสอบการทำธุรกรรมซ้ำ
         for (const txn of txns) {
             const existingTransaction = await findTransactionByRefId(txn.txnId);
             if (existingTransaction) {
                 return res.status(200).json({
                     id,
-                    statusCode: 20002,  // Custom error code for duplicate transaction
+                    statusCode: 20002,  // รหัสข้อผิดพลาดที่กำหนดเองสำหรับการทำธุรกรรมซ้ำ
                     error: 'Duplicate Transaction',
                     timestampMillis,
                     currency,
                     username,
                     productId,
-                    balance: balanceBefore  // Returning the current balance without change
+                    balance: balanceBefore  // คืนยอดเงินปัจจุบันโดยไม่มีการเปลี่ยนแปลง
                 });
             }
         }
 
-        // Update the balance after placing bets
+        // อัปเดตยอดเงินหลังจากวางเดิมพัน
         await updatePlayerBalance(username, -totalBetAmount, currency);
         const balanceAfter = balanceBefore - totalBetAmount;
 
-        // Log each transaction for placing bets
+        // บันทึกการทำธุรกรรมแต่ละครั้งสำหรับการวางเดิมพัน
         await logTransactions(txns, username, productId, currency, balanceBefore, balanceAfter, timestampMillis);
 
-        // Respond with the updated balance and transaction details
+        // ตอบกลับด้วยยอดเงินที่อัปเดตและรายละเอียดการทำธุรกรรม
         res.status(200).json({
             id,
             statusCode: 0,
@@ -117,7 +126,7 @@ const placeBets = async (req, res) => {
             username
         });
     } catch (error) {
-        console.error('Failed to place bets:', { error, username, txns });
+        console.error('เกิดข้อผิดพลาดในการวางเดิมพัน:', { error, username, txns });
         res.status(500).json({
             id,
             statusCode: 1,
@@ -127,7 +136,7 @@ const placeBets = async (req, res) => {
             currency,
             username,
             productId,
-            balanceBefore: balanceBefore,  // Providing previous balance if available
+            balanceBefore: balanceBefore,  // ให้ยอดเงินก่อนหน้านี้หากมี
             balanceAfter: undefined
         });
     }
@@ -151,7 +160,7 @@ const updateBalance = async (req, res) => {
     }
 };
 
-// Function to get balance
+// ฟังก์ชั่นเพื่อดึงยอดเงิน
 const getBalance = async (req, res) => {
     const { username, currency } = req.body;
     try {
@@ -159,18 +168,18 @@ const getBalance = async (req, res) => {
         res.status(200).json({
             statusCode: 0,
             balance,
-            message: 'Balance retrieved successfully'
+            message: 'ดึงยอดเงินสำเร็จ'
         });
     } catch (error) {
-        // Log the error for further investigation
-        console.error('Failed to retrieve balance:', { error, username });
+        // บันทึกข้อผิดพลาดเพื่อการตรวจสอบเพิ่มเติม
+        console.error('ดึงยอดเงินไม่สำเร็จ:', { error, username });
 
-        // Check if it's a server availability issue
+        // ตรวจสอบว่ามีปัญหาการให้บริการหรือไม่
         if (error.code === 'ECONNREFUSED' || error.response.status === 503) {
             res.status(503).json({
                 statusCode: 1,
                 error: 'Service Unavailable',
-                detail: 'The service is temporarily unavailable. Please try again later.'
+                detail: 'บริการชั่วคราวไม่พร้อมใช้งาน กรุณาลองใหม่ในภายหลัง.'
             });
         } else {
             res.status(500).json({
@@ -185,24 +194,44 @@ const getBalance = async (req, res) => {
 const settleBets = async (req, res) => {
     const { id, productId, username, currency, timestampMillis, txns } = req.body;
     try {
-        // Calculate the total payouts and bets
+        // ตรวจสอบการทำธุรกรรมซ้ำ
+        // for (const txn of txns) {
+        //     const existingTransaction = await findTransactionByRefId(txn.txnId);
+        //     console.log('existingTransaction = ', existingTransaction);
+        //     if (existingTransaction) {
+        //         return res.status(200).json({
+        //             id,
+        //             statusCode: 20002,  // รหัสข้อผิดพลาดที่กำหนดเองสำหรับการทำธุรกรรมซ้ำ
+        //             error: 'Duplicate Transaction',
+        //             timestampMillis,
+        //             productId,
+        //             balance: await getPlayerBalance(username, currency),
+        //             balanceBefore: existingTransaction.balanceBefore,
+        //             balanceAfter: existingTransaction.balanceAfter,
+        //             username,
+        //             currency
+        //         });
+        //     }
+        // }
+
+        // คำนวณการจ่ายเงินและการเดิมพันทั้งหมด
         let totalPayout = txns.reduce((acc, txn) => acc + txn.payoutAmount, 0);
         let totalBets = txns.reduce((acc, txn) => acc + Math.abs(txn.betAmount), 0);
         
-        // Get the user's balance before the transactions
+        // ดึงยอดเงินของผู้ใช้ก่อนการทำธุรกรรม
         const balanceBefore = await getPlayerBalance(username, currency);
         
-        // Calculate the net change in balance
+        // คำนวณการเปลี่ยนแปลงยอดเงินสุทธิ
         const netChange = totalPayout;
         
-        // Update the user's balance
+        // อัปเดตยอดเงินของผู้ใช้
         await updatePlayerBalance(username, netChange, currency);
         const balanceAfter = balanceBefore + netChange;
 
-        // Log each transaction
+        // บันทึกการทำธุรกรรมแต่ละรายการ
         await logTransactions(txns, username, productId, currency, balanceBefore, balanceAfter, timestampMillis);
 
-        // Send the response with the updated balance information
+        // ส่งการตอบกลับด้วยข้อมูลยอดเงินที่อัปเดต
         res.json({
             username,
             currency,
@@ -214,7 +243,7 @@ const settleBets = async (req, res) => {
             productId
         });
     } catch (error) {
-        console.error('Failed to settle bets:', { error, username });
+        console.error('เกิดข้อผิดพลาดในการชำระการเดิมพัน:', { error, username });
         res.status(500).json({
             statusCode: 1,
             error: 'Internal Server Error',
@@ -223,23 +252,25 @@ const settleBets = async (req, res) => {
     }
 };
 
+
+
 const cancelBets = async (req, res) => {
     const { username, currency, txns, id, productId, timestampMillis } = req.body;
     try {
-        // Calculate total refund amount
+        // คำนวณจำนวนเงินคืนทั้งหมด
         const totalRefundAmount = txns.reduce((sum, txn) => sum + Math.abs(txn.betAmount), 0);
         
-        // Get the user's balance before the refund
+        // ดึงยอดเงินของผู้ใช้ก่อนการคืนเงิน
         const balanceBefore = await getPlayerBalance(username, currency);
         
-        // Update the user's balance by adding the refund amount
+        // อัปเดตยอดเงินของผู้ใช้โดยเพิ่มจำนวนเงินคืน
         await updatePlayerBalance(username, totalRefundAmount, currency);
         const balanceAfter = balanceBefore + totalRefundAmount;
 
-        // Log each transaction for auditing
+        // บันทึกการทำธุรกรรมแต่ละรายการเพื่อการตรวจสอบ
         await logTransactions(txns, username, productId, currency, balanceBefore, balanceAfter, timestampMillis);
 
-        // Respond with the updated balance information
+        // ตอบกลับด้วยข้อมูลยอดเงินที่อัปเดต
         res.json({
             id,
             statusCode: 0,
@@ -251,7 +282,7 @@ const cancelBets = async (req, res) => {
             username
         });
     } catch (error) {
-        console.error('Failed to cancel bets:', { error, username });
+        console.error('ยกเลิกการเดิมพันไม่สำเร็จ:', { error, username });
         res.status(500).json({
             id,
             statusCode: 1,
@@ -261,7 +292,7 @@ const cancelBets = async (req, res) => {
             currency,
             username,
             productId,
-            balanceBefore: undefined, // Not available due to error
+            balanceBefore: undefined, // ไม่สามารถใช้ได้เนื่องจากข้อผิดพลาด
             balanceAfter: undefined
         });
     }
