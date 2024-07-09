@@ -1,0 +1,336 @@
+
+const { getPlayerBalance, updatePlayerBalance } = require('../services/playerBalanceService');
+const { findTransactionByRefId, saveTransaction } = require('../services/transactionService');
+
+const Transaction = require('../models/transactionModel');
+
+const checkBalance = async (req, res) => {
+    const { username, currency, id } = req.body;
+    try {
+        const balance = await getPlayerBalance(username, currency);
+
+        await Transaction.create({
+            username,
+            type: 'Check Balance',
+            amount: balance,
+            currency
+        });
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balance,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+// Example for the placeBets function with database interaction
+const placeBets = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        const totalBetAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+
+        if (balanceBefore < totalBetAmount) {
+            return res.status(400).json({ id, statusCode: 1, error: 'Insufficient Balance' });
+        }
+
+        await updatePlayerBalance(username, -totalBetAmount, currency);
+        const balanceAfter = balanceBefore - totalBetAmount;
+
+        // Assuming each txn needs to be logged separately
+        for (const txn of txns) {
+            await Transaction.create({
+                username,
+                type: 'Place Bets',
+                amount: -txn.betAmount,
+                currency,
+                status: txn.status, // This should match your model's requirement
+                refId: txn.txnId, // Assuming txnId is used as refId
+                detail: txn,
+                timestampMillis: req.body.timestampMillis
+            });
+        }
+
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        console.error('Failed to place bets:', { error, username, txns });
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const updateBalance = async (req, res) => {
+    const { username, amount, currency, id } = req.body;
+    try {
+        await updatePlayerBalance(username, amount, currency);
+        const newBalance = await getPlayerBalance(username, currency);
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balance: newBalance,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const getBalance = async (req, res) => {
+    const { username, currency } = req.body;
+    try {
+        const balance = await getPlayerBalance(username, currency);
+        res.json({
+            statusCode: 0,
+            balance,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const settleBets = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        const totalBetAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
+        const totalPayoutAmount = txns.reduce((sum, txn) => sum + txn.payoutAmount, 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+        if (balanceBefore < totalBetAmount) {
+            return res.status(400).json({ id, statusCode: 1, error: 'Insufficient Balance' });
+        }
+        await updatePlayerBalance(username, totalPayoutAmount - totalBetAmount, currency);
+        const balanceAfter = balanceBefore + (totalPayoutAmount - totalBetAmount);
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const cancelBets = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        const totalRefundAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, totalRefundAmount, currency);
+        const balanceAfter = balanceBefore + totalRefundAmount;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const adjustBets = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalAdjustAmount = 0;
+        for (const txn of txns) {
+            if (await findTransactionByRefId(txn.refId)) {
+                return res.status(400).json({ statusCode: 1, error: 'Duplicate transaction ID' });
+            }
+            totalAdjustAmount += txn.status === 'CREDIT' ? txn.amount : -txn.amount;
+            await saveTransaction(txn.refId, txn.status, txn.amount, username);
+        }
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, totalAdjustAmount, currency);
+        const balanceAfter = balanceBefore + totalAdjustAmount;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            betAmount,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const rollbackBets = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalRollbackAmount = txns.reduce((sum, txn) => sum + (txn.status === 'SETTLED' ? txn.payoutAmount : txn.betAmount), 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, -totalRollbackAmount, currency);
+        const balanceAfter = balanceBefore - totalRollbackAmount;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const winRewards = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalPayoutAmount = txns.reduce((sum, txn) => sum + txn.payoutAmount, 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, totalPayoutAmount, currency);
+        const balanceAfter = balanceBefore + totalPayoutAmount;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const payTips = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalTipAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+        if (balanceBefore < totalTipAmount) {
+            return res.status(400).json({ id, statusCode: 1, error: 'Insufficient Balance' });
+        }
+        await updatePlayerBalance(username, -totalTipAmount, currency);
+        const balanceAfter = balanceBefore - totalTipAmount;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const cancelTips = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalRefundAmount = txns.reduce((sum, txn) => sum + txn.betAmount, 0);
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, totalRefundAmount, currency);
+        const balanceAfter = balanceBefore + totalRefundAmount;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const voidSettled = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalAdjustment = 0;
+        txns.forEach(txn => {
+            totalAdjustment += (txn.betAmount - txn.payoutAmount);
+        });
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, totalAdjustment, currency);
+        const balanceAfter = balanceBefore + totalAdjustment;
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+const adjustBalance = async (req, res) => {
+    const { username, currency, txns, id } = req.body;
+    try {
+        let totalAdjustment = 0;
+
+        for (const txn of txns) {
+            if (await findTransactionByRefId(txn.refId)) {
+                return res.status(400).json({ id, statusCode: 1, error: 'Duplicate transaction ID' });
+            }
+            totalAdjustment += txn.status === 'CREDIT' ? txn.amount : -txn.amount;
+            await saveTransaction(txn.refId, txn.status, txn.amount, username);
+        }
+
+        const balanceBefore = await getPlayerBalance(username, currency);
+        await updatePlayerBalance(username, totalAdjustment, currency);
+        const balanceAfter = balanceBefore + totalAdjustment;
+
+        res.json({
+            id,
+            statusCode: 0,
+            timestampMillis: Date.now(),
+            currency,
+            balanceBefore,
+            balanceAfter,
+            username,
+        });
+    } catch (error) {
+        res.status(500).json({ statusCode: 1, error: 'Internal Server Error', detail: error.message });
+    }
+};
+
+module.exports = {
+    checkBalance,
+    placeBets,
+    updateBalance,
+    getBalance,
+    settleBets,
+    cancelBets,
+    adjustBets,
+    rollbackBets,
+    winRewards,
+    payTips,
+    cancelTips,
+    voidSettled,
+    adjustBalance
+};
