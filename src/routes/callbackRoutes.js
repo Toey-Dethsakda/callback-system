@@ -10,7 +10,7 @@ router.post('/getBalance', getBalance);
 router.post('/settleBets', settleBets);
 router.post('/cancelBets', cancelBets);
 router.post('/adjustBets', adjustBets);
-router.post('/rollbackBets', rollbackBets);
+router.post('/rollback', rollbackBets);
 router.post('/winRewards', winRewards);
 router.post('/payTips', payTips);
 router.post('/cancelTips', cancelTips);
